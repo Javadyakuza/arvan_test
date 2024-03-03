@@ -36,24 +36,25 @@ pub struct Command {
     pub job_type: JobType,
 }
 pub struct Repairer {
-    pub id: u32,                                       // not going to be changed
-    pub thread: Option<JoinHandle<()>>,                // not going to be changed
-    pub total_broken: u32,                             // not going to be changed
-    pub total_fixed: u32,                              // ▶️ will be changed in the execute
+    pub id: u32,                                    // not going to be changed
+    pub thread: Option<JoinHandle<()>>,             // not going to be changed
+    pub total_broken: u32,                          // not going to be changed
+    pub total_fixed: u32,                           // ▶️ will be changed in the execute
     pub other_repairers_repairs: HashMap<u32, u32>, // ⏸️  ▶️ will be changed in the execute and decision making
     pub total_moves: u32,                           // ▶️ will be changed in the execute
     pub sender: Arc<Mutex<mpsc::Sender<Command>>>,  // not going to be changed
-    pub receiver: Arc<Mutex<mpsc::Receiver<Command>>>, // not going to be changed
-    pub current_algorithm: MovementAlgorithm,       // ⏸️ change in decision making
-    pub current_location: (u32, u32),               // ▶️ chang in execute
-    pub matrix_size: u32,                           // not going to be changed
-    pub decision: Option<Move>,                     // ⏸️  ▶️ change in decision making and in execute
-    pub move_turn: bool,                            // ▶️ change in execute
+    // pub receiver: Arc<Mutex<mpsc::Receiver<Command>>>, // not going to be changed // the spawned thread will only need that so we do not save this value in the thread stat
+    pub current_algorithm: MovementAlgorithm, // ⏸️ change in decision making
+    pub current_location: (u32, u32),         // ▶️ chang in execute
+    pub matrix_size: u32,                     // not going to be changed
+    pub decision: Option<Move>,               // ⏸️  ▶️ change in decision making and in execute
+    pub move_turn: bool,                      // ▶️ change in execute
 }
 
 impl Repairer {
     pub fn new_repairer(
         self, // we will build a instance manually first and then we will call this new function that will create a new instance for us.
+        receiver: Arc<Mutex<mpsc::Receiver<Command>>>,
     ) -> Self {
         // -> Self
         // @notice @dev we do not actually need to return anything since we are only communicating with the messages through a
@@ -63,14 +64,13 @@ impl Repairer {
         let thread_id = self.id;
         let matrix_size = self.matrix_size;
         let id = self.id;
-        let receiver = self.receiver;
-        let sender = self.sender;
+        let sender = Arc::clone(&self.sender);
         let total_broken = self.total_broken;
-        let current_algorithm = self.current_algorithm;
+        let current_algorithm = self.current_algorithm.clone();
         let current_location = self.current_location;
-        let decision = self.decision;
+        let decision = self.decision.clone();
         let move_turn = self.move_turn;
-        let other_repairers_repairs = self.other_repairers_repairs;
+        let other_repairers_repairs = self.other_repairers_repairs.clone();
         let repairer_state = Arc::new(Mutex::new(self));
         let repairer_thread = thread::spawn(move || loop {
             // setting a listener over the receiver created by the master thread
@@ -102,7 +102,6 @@ impl Repairer {
             other_repairers_repairs,
             total_moves: 0,
             sender,
-            receiver,
             current_algorithm,
             current_location,
             matrix_size,

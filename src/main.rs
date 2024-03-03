@@ -61,6 +61,4 @@ fn main() {
     println!("adding broken houses ...");
     thread::sleep(Duration::from_secs(2));
     print_matrix(&matrix);
-
-    
 }
