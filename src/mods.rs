@@ -1,11 +1,10 @@
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc, Mutex,
-};
+use std::{ops::Add, rc::Rc, sync::{
+    atomic::{AtomicBool, AtomicU8, Ordering}, Arc, Barrier, Mutex
+}};
 
 use rand::prelude::SliceRandom;
 
-use crate::models::{Command, Move, Note, Repairer, RepairerResult};
+use crate::models::{JobType, Move, Note, Repairer, RepairerResult};
 
 pub fn gen_rand_index(amount: i32, min: i32, max: i32) -> Vec<i32> {
     let mut rng = rand::thread_rng();
@@ -14,7 +13,7 @@ pub fn gen_rand_index(amount: i32, min: i32, max: i32) -> Vec<i32> {
     numbers.iter().take(amount as usize).cloned().collect()
 }
 
-pub fn print_matrix(matrix: &Arc<Vec<Vec<(Vec<String>, AtomicU8)>>>) {
+pub fn print_matrix(matrix: &Arc<Vec<Vec<(Vec<Arc<Mutex<String>>>, AtomicU8)>>>) {
     for row in matrix.iter() {
         for element in row.iter() {
             print!("{:?} | ", element.1);
@@ -29,7 +28,9 @@ pub fn print_matrix(matrix: &Arc<Vec<Vec<(Vec<String>, AtomicU8)>>>) {
 
 pub fn make_decision(
     repairer: Arc<Mutex<Repairer>>,
-    matrix: Arc<Vec<Vec<(Vec<String>, AtomicU8)>>>,
+    // barrier: Arc<Barrier>,
+    matrix: Arc<Vec<Vec<(Vec<Arc<Mutex<String>>>, AtomicU8)>>>,
+    id: u32
 ) -> bool {
     let mut repairer = repairer.lock().unwrap();
     // // based on the turn which will either be a breath or depth move we will find the sensitive houses that the algorithm must be rotated.
@@ -43,10 +44,13 @@ pub fn make_decision(
     //     .map(|col| (matrix_size - 1, col))
     //     .collect();
     // let mut left_rotators: Vec<(u32, u32)> = (0..matrix_size).rev().map(|row| (row, 0)).collect();
-
+    
     // getting the next move in condition that nothing is checked
     let mut n_move: Move = repairer.current_algorithm.get_move(repairer.move_turn);
-
+    if repairer.last_move_rotated {
+        n_move = repairer.last_move.clone();
+        repairer.last_move_rotated = false;
+    }
     // checking the conditions that may change the algo
 
     // checking the current index status -> might change to Move::Fix
@@ -56,62 +60,54 @@ pub fn make_decision(
     if current_value == 11 {
         n_move = Move::Fix;
 
-        repairer.decision = Some(n_move); // saving the fixing op into the threads task queue // todo
+        repairer.decision = n_move.clone(); // saving the fixing op into the threads task queue // todo
                                           // saving the move int he threads move queue // todo
                                           // sending the confirmation
-        repairer
-            .sender
-            .lock()
-            .unwrap()
-            .send(Command {
-                recipient_repairer: 7,
-                job_type: crate::models::JobType::DecisionMade,
-            })
-            .unwrap();
+        if repairer.last_move_rotated {
+          repairer.last_move_rotated = false;
+        }
+        // repairer
+        //     .sender
+        //     .lock().unwrap()
+        //     .send(
+        //      crate::models::JobType::DecisionMade,
+        //     )
+        //     .unwrap();
+
+        // barrier.wait();
         return true; // return true because the first priority is the fixing
     }
 
     // reading the notes // might change to Move::None
-    for (repairer_id, note) in matrix[repairer.current_location.0 as usize]
+    for (note_idx, note) in matrix[repairer.current_location.0 as usize]
     [repairer.current_location.1 as usize].0.iter().enumerate() {
-        let num_repairs = Note::parse(&note).num_repairs;
+        let num_repairs = Note::parse(&note.lock().unwrap()).num_repairs;
         // checking with the previous value of the repairers value
         if **(repairer
             .other_repairers_repairs
-            .get(&(repairer_id as u32))
+            .get(&(note_idx as u32))
             .as_ref()
             .unwrap())
-            != num_repairs // the number of the fixes can not be reduced so != will do the job and there is no need for greater and smaller than sign.
+            < num_repairs // the number of the fixes can not be reduced so != will do the job and there is no need for greater and smaller than sign.
             && 
             // the current threads state was updated in the last round of the execute function
-            repairer_id as u32 != repairer.id
-        {
+            note_idx as u32 != repairer.id
+        {   
             // updating the specific repairer total repairs
             repairer
                 .other_repairers_repairs
-                .insert(repairer_id as u32, num_repairs);
-        }
-        
-        if repairer.get_total_fixes_from_notes() == repairer.total_broken  {
-            n_move = Move::None;
-            repairer.decision = Some(n_move);
-            // killing the thread // todo
-            // sending the confirmation
-            repairer
-                .sender
-                .lock()
-                .unwrap()
-                .send(Command {
-                    recipient_repairer: 7,
-                    job_type: crate::models::JobType::DecisionMade,
-                })
-                .unwrap();
-            return true;
+                .insert(note_idx as u32, num_repairs).unwrap();
+
         }
     }
 
-    // checking the index // might rotate tha algo
+        if repairer.get_total_fixes_from_notes() == repairer.total_broken  {
+            n_move = Move::None;
+            repairer.decision = n_move.clone();
+            return true;
+        }
 
+    // checking the index // might rotate tha algo
     // case 1 => corners
     let corners = [
         (0, 0),
@@ -119,15 +115,36 @@ pub fn make_decision(
         (repairer.matrix_size - 1, repairer.matrix_size - 1),
         (repairer.matrix_size - 1, 0),
     ];
-    if corners
-        .iter()
-        .any(|corner| *corner == repairer.current_location)
-    {
+    if  repairer.current_location == corners[0] && (n_move == Move::Left || n_move == Move::Up ){
         // updating the threads state
         repairer.current_algorithm.rotate_algo(&n_move);
+        repairer.last_move_rotated = true;
         n_move.rotate_dir();
-        repairer.decision = Some(n_move);
-    } else {
+        repairer.last_move = n_move.clone();
+        repairer.decision = n_move.clone();
+    } else if  repairer.current_location == corners[1] && (n_move == Move::Right || n_move == Move::Up ){
+        // updating the threads state
+        repairer.current_algorithm.rotate_algo(&n_move);
+        repairer.last_move_rotated = true;
+        n_move.rotate_dir();
+        repairer.last_move = n_move.clone();
+        repairer.decision = n_move.clone();
+    } else if  repairer.current_location == corners[2] && (n_move == Move::Right || n_move == Move::Down ){
+        // updating the threads state
+        repairer.current_algorithm.rotate_algo(&n_move);
+        repairer.last_move_rotated = true;
+        n_move.rotate_dir();
+        repairer.last_move = n_move.clone();
+        repairer.decision = n_move.clone();
+    } else if repairer.current_location == corners[3] && (n_move == Move::Left || n_move == Move::Down ){
+        // updating the threads state
+        repairer.current_algorithm.rotate_algo(&n_move);
+        repairer.last_move_rotated = true;
+        n_move.rotate_dir();
+        repairer.last_move = n_move.clone();
+        repairer.decision = n_move.clone();
+    } else { 
+        if !repairer.last_move_rotated {
         // case 2 => edges
         if n_move.is_horizontal() {
             // checking the right and the left edges
@@ -137,14 +154,14 @@ pub fn make_decision(
                 if n_move == Move::Left {
                     repairer.current_algorithm.rotate_algo(&n_move);
                     n_move.rotate_dir();
-                    repairer.decision = Some(n_move);
+                    repairer.decision = n_move.clone();
                 }
             } else if repairer.current_location.1 == repairer.matrix_size - 1 {
                 // on the right edge, changing if next move is right
                 if n_move == Move::Right {
                     repairer.current_algorithm.rotate_algo(&n_move);
                     n_move.rotate_dir();
-                    repairer.decision = Some(n_move);
+                    repairer.decision = n_move.clone();
                 }
             }
         } else {
@@ -155,59 +172,49 @@ pub fn make_decision(
                 if n_move == Move::Up {
                     repairer.current_algorithm.rotate_algo(&n_move);
                     n_move.rotate_dir();
-                    repairer.decision = Some(n_move);
+                    repairer.decision = n_move.clone();
                 }
             } else if repairer.current_location.0 == repairer.matrix_size - 1 {
                 // on the bottom edge, changing if next move is down
                 if n_move == Move::Down {
                     repairer.current_algorithm.rotate_algo(&n_move);
                     n_move.rotate_dir();
-                    repairer.decision = Some(n_move);
+                    repairer.decision = n_move.clone();
                 }
             }
         }
     }
+    }
     // sending the confirmation
-    repairer
-        .sender
-        .lock()
-        .unwrap()
-        .send(Command {
-            recipient_repairer: 7,
-            job_type: crate::models::JobType::DecisionMade,
-        })
-        .unwrap();
+
+    if repairer.decision == Move::Empty {
+        repairer.decision = n_move.clone();
+    }
+
     true // incase none of the if clauses returned the true we do the least move detected above by the <Move::get_move()> fn.
 }
 
 pub fn execute(
     repairer: Arc<Mutex<Repairer>>,
-    matrix: Arc<Vec<Vec<(Vec<String>, AtomicU8)>>>,
+    // barrier: Arc<Barrier>,
+    checks : Arc<Vec<AtomicBool>>,
+    matrix: Arc<Vec<Vec<(Vec<Arc<Mutex<String>>>, AtomicU8)>>>,
+    id: u32
 ) -> bool {
     let mut repairer = repairer.lock().unwrap();
+
     // applying the move
 
-    match repairer.decision.as_ref().unwrap() {
+    match repairer.decision {
+        Move::Empty => panic!("decision making round didn't make any decisions"),
         Move::None => {
-            repairer.total_moves += 1;
+             repairer.total_moves += 1;
 
 
             // sending the confirmation
-            repairer
-                .sender
-                .lock()
-                .unwrap()
-                .send(Command {
-                    recipient_repairer: 7,
-                    job_type: crate::models::JobType::End(RepairerResult {
-                        id: repairer.id,
-                        repairs: repairer.total_fixed,
-                        moves: repairer.total_moves, 
-                        goal: repairer.total_broken,
-                        all_players_repairs: repairer.other_repairers_repairs.values().map(|&x| x).collect()        
-                    }),
-                })
-                .unwrap();
+
+            checks[repairer.id as usize].store(true, Ordering::Relaxed);
+            // barrier.wait();
             false
         }
         Move::Fix => {
@@ -217,13 +224,13 @@ pub fn execute(
                 .store(0, Ordering::Relaxed);
 
             // updating the decision
-            repairer.decision = None;
+            repairer.decision = Move::Empty.clone();
 
             // updating the total fixed
-            repairer.total_fixed += 1;
+            repairer.total_fixed = repairer.total_fixed.add(1);
 
             // adding the total moves
-            repairer.total_moves += 1;
+            repairer.total_moves = repairer.total_moves.add(1);
 
             // leaving the note
             // getting the old note
@@ -231,22 +238,26 @@ pub fn execute(
             [repairer.current_location.1 as usize].0[repairer.id as usize].clone();
             
             // replacing with the new note
-            let _ = matrix[repairer.current_location.0 as usize]
-            [repairer.current_location.1 as usize].0[repairer.id as usize].replace(
-                &old_note,
-                 format!("{} repaired {} times", repairer.id, repairer.total_fixed
-                ).as_str());  
+            // let _ =
+             let mut note = matrix[repairer.current_location.0 as usize]
+            [repairer.current_location.1 as usize].0[repairer.id as usize].lock().unwrap();
+            *note = format!("{} repaired {} times", repairer.id, repairer.total_fixed);
+
+            // .replace(
+            //     &old_note,
+            //      format!("{} repaired {} times", repairer.id, repairer.total_fixed
+            //     ).as_str());  
             
-            // sending the confirmation
-            repairer
-                .sender
-                .lock()
-                .unwrap()
-                .send(Command {
-                    recipient_repairer: 7,
-                    job_type: crate::models::JobType::Executed,
-                })
-                .unwrap();
+
+            // updating the other repairers 
+            let tmp_tf = repairer.total_fixed;
+            let tmp_id = repairer.id;
+
+            repairer.other_repairers_repairs.insert(tmp_id, tmp_tf).unwrap();
+
+            // updating the move turn
+            repairer.move_turn = !repairer.move_turn;
+
 
             true
         }
@@ -256,12 +267,11 @@ pub fn execute(
             // updating the current location
             repairer.current_location = repairer
                 .decision
-                .as_ref()
-                .unwrap()
                 .apply_on_index(repairer.current_location);
 
             // updating the decision
-            repairer.decision = None;
+            repairer.decision = Move::Empty;
+
 
             //updating the move turn
             repairer.move_turn = !repairer.move_turn;
@@ -270,16 +280,13 @@ pub fn execute(
             repairer.total_moves += 1;
 
             // sending the confirmation
-            repairer
-                .sender
-                .lock()
-                .unwrap()
-                .send(Command {
-                    recipient_repairer: 7,
-                    job_type: crate::models::JobType::Executed,
-                })
-                .unwrap();
-
+            // repairer
+            //     .sender
+            //     .lock().unwrap()
+            //     .send(crate::models::JobType::Executed,
+            //     )
+            //     .unwrap();
+                // barrier.wait();
             true
         }
     }

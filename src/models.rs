@@ -1,13 +1,18 @@
 use std::{
     collections::HashMap,
     str::FromStr,
-    sync::{atomic::AtomicU8, mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU8},
+        mpsc::{self, Receiver, Sender},
+        Arc, Barrier, Mutex,
+    },
     thread::{self, JoinHandle},
 };
 
 use crate::{execute, make_decision};
 
-// type Job = Box<dyn FnOnce() + Send + 'static>;
+pub type JobTypeSender = Arc<Mutex<Sender<JobType>>>;
+pub type JobTypeReceiver = Arc<Mutex<Receiver<JobType>>>;
 
 pub struct RepairerResult {
     pub id: u32,
@@ -24,17 +29,23 @@ impl RepairerResult {
         )
     }
 }
+#[derive(Debug)]
 pub enum JobType {
-    DecisionMaking(Arc<Vec<Vec<(Vec<String>, AtomicU8)>>>),
-    Execute(Arc<Vec<Vec<(Vec<String>, AtomicU8)>>>),
-    DecisionMade,
-    Executed,
-    End(RepairerResult),
+    DecisionMaking(
+        Arc<Vec<Vec<(Vec<Arc<Mutex<String>>>, AtomicU8)>>>,
+        Arc<Barrier>,
+    ),
+    Execute(
+        Arc<Vec<Vec<(Vec<Arc<Mutex<String>>>, AtomicU8)>>>, // the matrix
+        Arc<Vec<AtomicBool>>,                               // the explore end check
+        Arc<Barrier>,                                       // the beginning barrier
+        Arc<Barrier>,                                       // the ending barrier
+    ),
+    // DecisionMade,
+    // Executed,
+    // End(RepairerResult),
 }
-pub struct Command {
-    pub recipient_repairer: u32, // 7 is the master thread
-    pub job_type: JobType,
-}
+#[derive(Debug)]
 pub struct Repairer {
     pub id: u32,                                    // not going to be changed
     pub thread: Option<JoinHandle<()>>,             // not going to be changed
@@ -42,91 +53,35 @@ pub struct Repairer {
     pub total_fixed: u32,                           // ▶️ will be changed in the execute
     pub other_repairers_repairs: HashMap<u32, u32>, // ⏸️  ▶️ will be changed in the execute and decision making
     pub total_moves: u32,                           // ▶️ will be changed in the execute
-    pub sender: Arc<Mutex<mpsc::Sender<Command>>>,  // not going to be changed
-    // pub receiver: Arc<Mutex<mpsc::Receiver<Command>>>, // not going to be changed // the spawned thread will only need that so we do not save this value in the thread stat
+    // pub receiver: Arc<Mutex<Receiver<Command>>>,// the spawned thread will only need that so we do not save this value in the thread state
     pub current_algorithm: MovementAlgorithm, // ⏸️ change in decision making
     pub current_location: (u32, u32),         // ▶️ chang in execute
     pub matrix_size: u32,                     // not going to be changed
-    pub decision: Option<Move>,               // ⏸️  ▶️ change in decision making and in execute
+    pub decision: Move,                       // ⏸️  ▶️ change in decision making and in execute
     pub move_turn: bool,                      // ▶️ change in execute
+    pub last_move_rotated: bool,
+    pub last_move: Move,
 }
 
 impl Repairer {
-    pub fn new_repairer(
-        self, // we will build a instance manually first and then we will call this new function that will create a new instance for us.
-        receiver: Arc<Mutex<mpsc::Receiver<Command>>>,
-    ) -> Self {
-        // -> Self
-        // @notice @dev we do not actually need to return anything since we are only communicating with the messages through a
-        // channel but since the data built in the function during the function call will be saved into the call stack then after
-        // the function call the data will be gone so we will save the information if that thread that we spawned in a unnamed variable
-        // but we do not use that.
-        let thread_id = self.id;
-        let matrix_size = self.matrix_size;
-        let id = self.id;
-        let sender = Arc::clone(&self.sender);
-        let total_broken = self.total_broken;
-        let current_algorithm = self.current_algorithm.clone();
-        let current_location = self.current_location;
-        let decision = self.decision.clone();
-        let move_turn = self.move_turn;
-        let other_repairers_repairs = self.other_repairers_repairs.clone();
-        let repairer_state = Arc::new(Mutex::new(self));
-        let repairer_thread = thread::spawn(move || loop {
-            // setting a listener over the receiver created by the master thread
-            let message: Command = receiver.lock().unwrap().recv().unwrap();
-            if message.recipient_repairer == thread_id {
-                // matching the message type
-                match message.job_type {
-                    JobType::DecisionMaking(matrix) => {
-                        make_decision(repairer_state.clone(), matrix);
-                    }
-                    JobType::Execute(matrix) => {
-                        let exe_res = execute(repairer_state.clone(), matrix);
-                        if !exe_res {
-                            // at this stage the result message is sent to the master thread and we can kill the thread gracefully
-                            break;
-                        }
-                    }
-                    // not related command, impossible
-                    _ => panic!("invalid command received"),
-                }
-            }
-        });
-
-        Repairer {
-            id,
-            thread: Some(repairer_thread),
-            total_broken,
-            total_fixed: 0,
-            other_repairers_repairs,
-            total_moves: 0,
-            sender,
-            current_algorithm,
-            current_location,
-            matrix_size,
-            decision,
-            move_turn, // means the first move
-        }
-    }
     pub fn get_total_fixes_from_notes(&self) -> u32 {
-        let mut tmp_total_fix: u32 = 0;
-        let _ = self
-            .other_repairers_repairs
-            .values()
-            .map(|v| tmp_total_fix += *v);
-        tmp_total_fix + self.total_fixed
+        let mut tmp_total_fix = 0;
+        for v in self.other_repairers_repairs.values() {
+            tmp_total_fix += v;
+        }
+        tmp_total_fix
     }
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum Move {
     Up,
     Down,
     Right,
     Left,
     Fix,
-    None,
+    None,  // this means the end of the explore and there is no more move available
+    Empty, // the actual None value, no moves for now
 }
 
 impl Move {
@@ -149,15 +104,15 @@ impl Move {
     }
     pub fn apply_on_index(&self, index: (u32, u32)) -> (u32, u32) {
         match self {
-            Self::Right => (index.0 + 1, index.1),
-            Self::Left => (index.0 - 1, index.1),
-            Self::Up => (index.0, index.1 + 1),
-            Self::Down => (index.0, index.1 - 1),
+            Self::Right => (index.0, index.1 + 1),
+            Self::Left => (index.0, index.1 - 1),
+            Self::Up => (index.0 - 1, index.1),
+            Self::Down => (index.0 + 1, index.1),
             _ => panic!("incorrect move to be applied !!"), // impossible
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MovementAlgorithm {
     BRD, // BFS right and down
     BLD, // BFS left and down
@@ -234,28 +189,28 @@ impl MovementAlgorithm {
         if current_mv.is_horizontal() {
             match self {
                 // first move for sure
-                Self::BRD => *self = Self::BLD,
-                Self::BLD => *self = Self::BRD,
-                Self::BRU => *self = Self::BLU,
-                Self::BLU => *self = Self::BRU,
+                Self::BRD => *self = Self::BLU,
+                Self::BLD => *self = Self::BRU,
+                Self::BRU => *self = Self::BLD,
+                Self::BLU => *self = Self::BRD,
                 // second for sure
-                Self::DDL => *self = Self::DDR,
-                Self::DDR => *self = Self::DDL,
-                Self::DUL => *self = Self::DUR,
-                Self::DUR => *self = Self::DUL,
+                Self::DDL => *self = Self::DUR,
+                Self::DDR => *self = Self::DUL,
+                Self::DUL => *self = Self::DDR,
+                Self::DUR => *self = Self::DDL,
             }
         } else {
             match self {
                 // first move for sure
-                Self::DDL => *self = Self::DUL,
-                Self::DDR => *self = Self::DUR,
-                Self::DUL => *self = Self::DDL,
-                Self::DUR => *self = Self::DDR,
+                Self::DDL => *self = Self::DUR,
+                Self::DDR => *self = Self::DUL,
+                Self::DUL => *self = Self::DDR,
+                Self::DUR => *self = Self::DDL,
                 // second move for sure
-                Self::BRD => *self = Self::BRU,
-                Self::BLD => *self = Self::BLU,
-                Self::BRU => *self = Self::BRD,
-                Self::BLU => *self = Self::BLD,
+                Self::BRD => *self = Self::BLU,
+                Self::BLD => *self = Self::BRU,
+                Self::BRU => *self = Self::BLD,
+                Self::BLU => *self = Self::BRD,
             }
         }
     }
@@ -270,7 +225,7 @@ impl Note {
     pub fn parse(raw_string: &String) -> Self {
         let parts: Vec<&str> = raw_string.split_whitespace().collect();
         // Handle invalid string format,
-        if parts.len() != 5 || parts[1] != "repaired" || parts[3] != "times" {
+        if parts.len() != 4 || parts[1] != "repaired" || parts[3] != "times" {
             panic!("unexpected format of string detected as a note !!") // Almost impossible panic
         }
         let id = u32::from_str(parts[0])
