@@ -3,13 +3,11 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicU8},
-        mpsc::{self, Receiver, Sender},
+        mpsc::{Receiver, Sender},
         Arc, Barrier, Mutex,
     },
-    thread::{self, JoinHandle},
+    thread::JoinHandle,
 };
-
-use crate::{execute, make_decision};
 
 pub type JobTypeSender = Arc<Mutex<Sender<JobType>>>;
 pub type JobTypeReceiver = Arc<Mutex<Receiver<JobType>>>;
@@ -61,6 +59,7 @@ pub struct Repairer {
     pub move_turn: bool,                      // ▶️ change in execute
     pub last_move_rotated: bool,
     pub last_move: Move,
+    pub result: String,
 }
 
 impl Repairer {

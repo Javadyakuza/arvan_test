@@ -5,8 +5,7 @@ pub mod mods;
 use mods::*;
 use std::{
     collections::HashMap,
-    process::Command,
-    rc::Rc,
+    ops::Add,
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc::{channel, Receiver, Sender},
@@ -16,10 +15,9 @@ use std::{
     time::Duration,
 };
 
-use crate::models::{
-    JobType, JobTypeReceiver, JobTypeSender, Move, MovementAlgorithm, Repairer, RepairerResult,
-};
+use crate::models::{JobType, JobTypeReceiver, JobTypeSender, Move, MovementAlgorithm, Repairer};
 fn main() {
+    clear_terminal();
     // creating a square matrix of the atomic bool's
     // rows and columns are pre-known for this specific example
     let rows: u8 = 7;
@@ -60,8 +58,8 @@ fn main() {
     let mut matrix: Arc<Vec<Vec<(Vec<Arc<Mutex<String>>>, AtomicU8)>>> = Arc::new(matrix);
 
     println!("initial matrix ");
-    print_matrix(&matrix);
-    thread::sleep(Duration::from_secs(2));
+    print_matrix(&matrix, vec![(0, 0), (0, 0), (0, 0), (0, 0)]);
+    thread::sleep(Duration::from_secs(1));
 
     // generating random rows for repairers
     let repairer_rows = gen_rand_index(4, 0, rows as i32);
@@ -78,13 +76,17 @@ fn main() {
             .store(11, std::sync::atomic::Ordering::Relaxed);
     }
 
-    let _ = Command::new("clear")
-        .status()
-        .expect("failed to execute ls");
-
     println!("adding broken houses ...");
-    thread::sleep(Duration::from_secs(2));
-    print_matrix(&matrix);
+    thread::sleep(Duration::from_secs(1));
+    print_matrix(
+        &matrix,
+        vec![
+            (repairer_rows[0] as u32, repairer_columns[0] as u32),
+            (repairer_rows[1] as u32, repairer_columns[1] as u32),
+            (repairer_rows[2] as u32, repairer_columns[2] as u32),
+            (repairer_rows[3] as u32, repairer_columns[3] as u32),
+        ],
+    );
 
     // creating the channels
     let mut channels: Vec<(
@@ -108,9 +110,6 @@ fn main() {
     ];
 
     // creating the  barrier
-    let decision_confirmation_barriers = Arc::new(Barrier::new(5)); // will let the execution part once the decisions are made
-    let exe_beginning_barriers = Arc::new(Barrier::new(5)); // will let all of the threads to start together
-    let exe_ending_barriers = Arc::new(Barrier::new(5)); // will let all of the execution end before the nex decision making round start
 
     // creating the repairers state
     let mut repairers_state: Vec<Arc<Mutex<Repairer>>> = Vec::new();
@@ -141,6 +140,7 @@ fn main() {
             move_turn: true, // means the first move
             last_move_rotated: false,
             last_move: Move::Empty,
+            result: "".to_string(),
         };
         repairers_state.push(Arc::new(Mutex::new(tmp_repairer)))
     }
@@ -148,6 +148,10 @@ fn main() {
     let state1: Arc<Mutex<Repairer>> = Arc::clone(&repairers_state[1 as usize]);
     let state2: Arc<Mutex<Repairer>> = Arc::clone(&repairers_state[2 as usize]);
     let state3: Arc<Mutex<Repairer>> = Arc::clone(&repairers_state[3 as usize]);
+    let main_state0: Arc<Mutex<Repairer>> = Arc::clone(&repairers_state[0 as usize]);
+    let main_state1: Arc<Mutex<Repairer>> = Arc::clone(&repairers_state[1 as usize]);
+    let main_state2: Arc<Mutex<Repairer>> = Arc::clone(&repairers_state[2 as usize]);
+    let main_state3: Arc<Mutex<Repairer>> = Arc::clone(&repairers_state[3 as usize]);
     let channel0 = Arc::clone(&channels[0 as usize].1);
     let channel1 = Arc::clone(&channels[1 as usize].1);
     let channel2 = Arc::clone(&channels[2 as usize].1);
@@ -165,8 +169,9 @@ fn main() {
             Ok(m) => match m.recv() {
                 Ok(m) => m,
                 Err(e) => {
-                    println!("{:?}", e.to_string());
-                    panic!()
+                    // the channels is closed
+                    println!("{}", e.to_string());
+                    break;
                 }
             },
 
@@ -178,21 +183,19 @@ fn main() {
         // matching the message type
         match message {
             JobType::DecisionMaking(matrix, barrier) => {
-                make_decision(state0.clone(), matrix, 0);
+                make_decision(state0.clone(), matrix);
                 barrier.wait();
             }
             JobType::Execute(matrix, checks, beg_barrier, end_barrier) => {
                 // at this stage each thread has decided on its move and they have received a separate execute message and all of them will wait till the barrier hits the threshold and then they all will function together.
                 beg_barrier.wait();
-                let exe_res = execute(state0.clone(), checks, matrix, 0);
+                let exe_res = execute(state0.clone(), checks, matrix);
                 end_barrier.wait();
                 if !exe_res {
                     // at this stage the result message is sent to the master thread and we can kill the thread gracefully
                     break;
                 }
             }
-            // not related command, impossible
-            _ => panic!("invalid command received"),
         }
     }));
     repairers.push(thread::spawn(move || loop {
@@ -201,8 +204,9 @@ fn main() {
             Ok(m) => match m.recv() {
                 Ok(m) => m,
                 Err(e) => {
-                    println!("{:?}", e.to_string());
-                    panic!()
+                    // the channels is closed
+                    println!("{}", e.to_string());
+                    break;
                 }
             },
 
@@ -214,21 +218,19 @@ fn main() {
         // // matching the message type
         match message {
             JobType::DecisionMaking(matrix, barrier) => {
-                make_decision(state1.clone(), matrix, 1);
+                make_decision(state1.clone(), matrix);
                 barrier.wait();
             }
             JobType::Execute(matrix, checks, beg_barrier, end_barrier) => {
                 // at this stage each thread has decided on its move and they have received a separate execute message and all of them will wait till the barrier hits the threshold and then they all will function together.
                 beg_barrier.wait();
-                let exe_res = execute(state1.clone(), checks, matrix, 1);
+                let exe_res = execute(state1.clone(), checks, matrix);
                 end_barrier.wait();
                 if !exe_res {
                     // at this stage the result message is sent to the master thread and we can kill the thread gracefully
                     break;
                 }
             }
-            // not related command, impossible
-            _ => panic!("invalid command received"),
         }
     }));
     repairers.push(thread::spawn(move || loop {
@@ -237,8 +239,9 @@ fn main() {
             Ok(m) => match m.recv() {
                 Ok(m) => m,
                 Err(e) => {
-                    println!("{:?}", e.to_string());
-                    panic!()
+                    // the channels is closed
+                    println!("{}", e.to_string());
+                    break;
                 }
             },
 
@@ -250,21 +253,19 @@ fn main() {
         // // matching the message type
         match message {
             JobType::DecisionMaking(matrix, barrier) => {
-                make_decision(state2.clone(), matrix, 2);
+                make_decision(state2.clone(), matrix);
                 barrier.wait();
             }
             JobType::Execute(matrix, checks, beg_barrier, end_barrier) => {
                 // at this stage each thread has decided on its move and they have received a separate execute message and all of them will wait till the barrier hits the threshold and then they all will function together.
                 beg_barrier.wait();
-                let exe_res = execute(state2.clone(), checks, matrix, 2);
+                let exe_res = execute(state2.clone(), checks, matrix);
                 end_barrier.wait();
                 if !exe_res {
                     // at this stage the result message is sent to the master thread and we can kill the thread gracefully
                     break;
                 }
             }
-            // not related command, impossible
-            _ => panic!("invalid command received"),
         }
     }));
     repairers.push(thread::spawn(move || loop {
@@ -273,8 +274,9 @@ fn main() {
             Ok(m) => match m.recv() {
                 Ok(m) => m,
                 Err(e) => {
-                    println!("{:?}", e.to_string());
-                    panic!()
+                    // the channels is closed
+                    println!("{}", e.to_string());
+                    break;
                 }
             },
 
@@ -286,24 +288,21 @@ fn main() {
         // // matching the message type
         match message {
             JobType::DecisionMaking(matrix, barrier) => {
-                make_decision(state3.clone(), matrix, 3);
-               barrier.wait();
+                make_decision(state3.clone(), matrix);
+                barrier.wait();
             }
             JobType::Execute(matrix, checks, beg_barrier, end_barrier) => {
                 // at this stage each thread has decided on its move and they have received a separate execute message and all of them will wait till the barrier hits the threshold and then they all will function together.
                 beg_barrier.wait();
-                let exe_res = execute(state3.clone(), checks, matrix, 3);
+                let exe_res = execute(state3.clone(), checks, matrix);
                 end_barrier.wait();
                 if !exe_res {
                     // at this stage the result message is sent to the master thread and we can kill the thread gracefully
                     break;
                 }
             }
-            // not related command, impossible
-            _ => panic!("invalid command received"),
         }
     }));
-    // }
 
     // start
     // @param dead_repairers will be used to check the end of the repairing progress.
@@ -318,50 +317,91 @@ fn main() {
     // there is two while loops
     // the first one is the main one is the check for the end of the progress and the inner nested one is for confirming the decision making.
     while !dead_repairers[0].load(Ordering::Relaxed)
-        && !dead_repairers[1].load(Ordering::Relaxed)
-        && !dead_repairers[2].load(Ordering::Relaxed)
-        && !dead_repairers[3].load(Ordering::Relaxed)
+        || !dead_repairers[1].load(Ordering::Relaxed)
+        || !dead_repairers[2].load(Ordering::Relaxed)
+        || !dead_repairers[3].load(Ordering::Relaxed)
     {
-        match channels[0].0.clone().lock() {
-            Ok(el) => el
-                .send(JobType::DecisionMaking(
-                    Arc::clone(&matrix),
-                    Arc::clone(&decision_confirmation_barriers),
-                ))
-                .unwrap(),
-            Err(e) => {}
-        };
+        let mut round_barriers: u32 = 1;
+        for i in 0..4 {
+            if !dead_repairers[i].load(Ordering::Relaxed) {
+                round_barriers = round_barriers.add(1);
+            }
+        }
+        // println!("round barriers {}", round_barriers);
+        let decision_confirmation_barriers = Arc::new(Barrier::new(round_barriers as usize)); // will let the execution part once the decisions are made
+        let exe_beginning_barriers = Arc::new(Barrier::new(round_barriers as usize)); // will let all of the threads to start together
+        let exe_ending_barriers = Arc::new(Barrier::new(round_barriers as usize)); // will let all of the execution end before the nex decision making round start
 
-        match channels[1].0.clone().lock() {
-            Ok(el) => el
-                .send(JobType::DecisionMaking(
-                    Arc::clone(&matrix),
-                    Arc::clone(&decision_confirmation_barriers),
-                ))
-                .unwrap(),
-            Err(e) => {}
-        };
+        clear_terminal();
+        let indexes: Vec<(u32, u32)> = vec![
+            Arc::clone(&main_state0).lock().unwrap().current_location,
+            Arc::clone(&main_state1).lock().unwrap().current_location,
+            Arc::clone(&main_state2).lock().unwrap().current_location,
+            Arc::clone(&main_state3).lock().unwrap().current_location,
+        ];
+        print_matrix(&matrix, indexes);
+        // println!(
+        //     "{}{}{}{}",
+        //     dead_repairers[0].load(Ordering::Relaxed),
+        //     dead_repairers[1].load(Ordering::Relaxed),
+        //     dead_repairers[2].load(Ordering::Relaxed),
+        //     dead_repairers[3].load(Ordering::Relaxed)
+        // );
 
-        match channels[2].0.clone().lock() {
-            Ok(el) => el
-                .send(JobType::DecisionMaking(
-                    Arc::clone(&matrix),
-                    Arc::clone(&decision_confirmation_barriers),
-                ))
-                .unwrap(),
-            Err(e) => {}
-        };
-
-        match channels[3].0.clone().lock() {
-            Ok(el) => el
-                .send(JobType::DecisionMaking(
-                    Arc::clone(&matrix),
-                    Arc::clone(&decision_confirmation_barriers),
-                ))
-                .unwrap(),
-            Err(e) => {}
-        };
-
+        // thread::sleep(Duration::from_millis(100));
+        if !dead_repairers[0].load(Ordering::Relaxed) {
+            match channels[0].0.clone().lock() {
+                Ok(el) => el
+                    .send(JobType::DecisionMaking(
+                        Arc::clone(&matrix),
+                        Arc::clone(&decision_confirmation_barriers),
+                    ))
+                    .unwrap(),
+                Err(e) => {
+                    panic!("{}", e.to_string())
+                }
+            };
+        }
+        if !dead_repairers[1].load(Ordering::Relaxed) {
+            match channels[1].0.clone().lock() {
+                Ok(el) => el
+                    .send(JobType::DecisionMaking(
+                        Arc::clone(&matrix),
+                        Arc::clone(&decision_confirmation_barriers),
+                    ))
+                    .unwrap(),
+                Err(e) => {
+                    panic!("{}", e.to_string())
+                }
+            };
+        }
+        if !dead_repairers[2].load(Ordering::Relaxed) {
+            match channels[2].0.clone().lock() {
+                Ok(el) => el
+                    .send(JobType::DecisionMaking(
+                        Arc::clone(&matrix),
+                        Arc::clone(&decision_confirmation_barriers),
+                    ))
+                    .unwrap(),
+                Err(e) => {
+                    panic!("{}", e.to_string())
+                }
+            };
+        }
+        if !dead_repairers[3].load(Ordering::Relaxed) {
+            match channels[3].0.clone().lock() {
+                Ok(el) => el
+                    .send(JobType::DecisionMaking(
+                        Arc::clone(&matrix),
+                        Arc::clone(&decision_confirmation_barriers),
+                    ))
+                    .unwrap(),
+                Err(e) => {
+                    panic!("{}", e.to_string())
+                }
+            };
+        }
+        // println!("des confirmation");
         decision_confirmation_barriers.wait();
 
         // Faze two: executing
@@ -380,8 +420,28 @@ fn main() {
         }
 
         // calling the beginning barrier and letting all of the threads to start together
+        // println!("exe beg");
         exe_beginning_barriers.wait();
-        // now they have started, we use another barrier to wait until all of the repiners have made their move.
+        // now they have started, we use another barrier to wait until all of the repairers have made their move.
+        // println!("exe end");
         exe_ending_barriers.wait();
+
+        // // printing the matrix state
+        // if dead_repairers[0].load(Ordering::Relaxed)
+        //     && dead_repairers[1].load(Ordering::Relaxed)
+        //     && dead_repairers[2].load(Ordering::Relaxed)
+        //     && dead_repairers[3].load(Ordering::Relaxed)
+        // {
+        //     break;
+        // }
     }
+    // println!("{:?}", dead_repairers);
+
+    println!(
+        "{} \n{} \n{} \n{} ",
+        Arc::clone(&main_state0).lock().unwrap().result,
+        Arc::clone(&main_state1).lock().unwrap().result,
+        Arc::clone(&main_state2).lock().unwrap().result,
+        Arc::clone(&main_state3).lock().unwrap().result,
+    );
 }
