@@ -327,7 +327,6 @@ fn main() {
                 round_barriers = round_barriers.add(1);
             }
         }
-        // println!("round barriers {}", round_barriers);
         let decision_confirmation_barriers = Arc::new(Barrier::new(round_barriers as usize)); // will let the execution part once the decisions are made
         let exe_beginning_barriers = Arc::new(Barrier::new(round_barriers as usize)); // will let all of the threads to start together
         let exe_ending_barriers = Arc::new(Barrier::new(round_barriers as usize)); // will let all of the execution end before the nex decision making round start
@@ -340,15 +339,9 @@ fn main() {
             Arc::clone(&main_state3).lock().unwrap().current_location,
         ];
         print_matrix(&matrix, indexes);
-        // println!(
-        //     "{}{}{}{}",
-        //     dead_repairers[0].load(Ordering::Relaxed),
-        //     dead_repairers[1].load(Ordering::Relaxed),
-        //     dead_repairers[2].load(Ordering::Relaxed),
-        //     dead_repairers[3].load(Ordering::Relaxed)
-        // );
 
-        // thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50));
+
         if !dead_repairers[0].load(Ordering::Relaxed) {
             match channels[0].0.clone().lock() {
                 Ok(el) => el
@@ -401,7 +394,6 @@ fn main() {
                 }
             };
         }
-        // println!("des confirmation");
         decision_confirmation_barriers.wait();
 
         // Faze two: executing
@@ -420,22 +412,10 @@ fn main() {
         }
 
         // calling the beginning barrier and letting all of the threads to start together
-        // println!("exe beg");
         exe_beginning_barriers.wait();
         // now they have started, we use another barrier to wait until all of the repairers have made their move.
-        // println!("exe end");
         exe_ending_barriers.wait();
-
-        // // printing the matrix state
-        // if dead_repairers[0].load(Ordering::Relaxed)
-        //     && dead_repairers[1].load(Ordering::Relaxed)
-        //     && dead_repairers[2].load(Ordering::Relaxed)
-        //     && dead_repairers[3].load(Ordering::Relaxed)
-        // {
-        //     break;
-        // }
     }
-    // println!("{:?}", dead_repairers);
 
     println!(
         "{} \n{} \n{} \n{} ",

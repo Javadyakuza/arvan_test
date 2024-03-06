@@ -2,7 +2,7 @@ use std::{ops::Add, process::Command, sync::{
     atomic::{AtomicBool, AtomicU8, Ordering}, Arc, Mutex
 }};
 
-use rand::prelude::SliceRandom;
+use rand::{prelude::SliceRandom, thread_rng, Rng};
 
 use crate::models::{ Move, Note, Repairer };
 
@@ -34,13 +34,22 @@ pub fn make_decision(
     // barrier: Arc<Barrier>,
     matrix: Arc<Vec<Vec<(Vec<Arc<Mutex<String>>>, AtomicU8)>>>,
 ) -> bool {
-    let mut repairer = repairer.lock().unwrap();
+    let mut repairer = match repairer.lock() {
+        Ok(r) => {
+            r}, 
+        Err(e) => {
+            println!("{}", e.to_string());
+            panic!("{}", e.to_string())
+        }
+    };
     // based on the turn which will either be a breath or depth move we will find the sensitive houses that the algorithm must be rotated.
     // the rotation is applied on the algorithm of the specific thread,
     // if the thread is on a BFS turn and the current index is a sensitive index we rotate the BFS direction and will update the new algo on the threads state.
     
     // getting the next move in condition that nothing is checked
-    let mut n_move: Move = repairer.current_algorithm.get_move(repairer.move_turn);
+    let mut rng = thread_rng();
+
+    let mut n_move: Move = repairer.current_algorithm.get_move(rng.gen_bool(1.0 / 3.0));
     if repairer.last_move_rotated {
         n_move = repairer.last_move.clone();
         repairer.last_move_rotated = false;
@@ -66,7 +75,7 @@ pub fn make_decision(
     // reading the notes // might change to Move::None
     for (note_idx, note) in matrix[repairer.current_location.0 as usize]
     [repairer.current_location.1 as usize].0.iter().enumerate() {
-        let num_repairs = Note::parse(&note.lock().unwrap()).num_repairs;
+        let num_repairs = Note::parse(match &note.lock() {Ok(n) => n, Err(e) => panic!("{}",e.to_string())}).num_repairs;
         // checking with the previous value of the repairers value
         if **(repairer
             .other_repairers_repairs
@@ -85,7 +94,6 @@ pub fn make_decision(
 
         }
     }
-
         if repairer.get_total_fixes_from_notes() == repairer.total_broken  {
             n_move = Move::None;
             repairer.decision = n_move.clone();
@@ -194,21 +202,29 @@ pub fn execute(
              repairer.total_moves += 1;
             checks[repairer.id as usize].store(true, Ordering::Relaxed);
             repairer.result = format!("repairer id: {}, repairs: {}, moves: {}, all_players_repairs: {:?}, goal: {}", repairer.id, repairer.total_fixed, repairer.total_moves, repairer.other_repairers_repairs, repairer.total_broken);
-            // println!("{}", repairer.result);
             false
         }
         Move::Fix => {
             // move is fix
             // fixing
-            matrix[repairer.current_location.0 as usize][repairer.current_location.1 as usize].1
-                .store(0, Ordering::Relaxed);
+            let exchange_res = matrix[repairer.current_location.0 as usize][repairer.current_location.1 as usize].1
+                .compare_exchange(11, 0, Ordering::Acquire, Ordering::Relaxed);
 
             // updating the decision
             repairer.decision = Move::Empty.clone();
 
-            // updating the total fixed
-            repairer.total_fixed = repairer.total_fixed.add(1);
+            match exchange_res { Ok(_) => {
+                 // updating the total fixed
+                repairer.total_fixed = repairer.total_fixed.add(1);             
+                // updating the other repairers 
+                let tmp_tf = repairer.total_fixed;
+                let tmp_id = repairer.id;               
+                repairer.other_repairers_repairs.insert(tmp_id, tmp_tf).unwrap();
 
+            }, Err(_) => {
+                // nothing
+            }}
+           
             // adding the total moves
             repairer.total_moves = repairer.total_moves.add(1);
 
@@ -219,11 +235,7 @@ pub fn execute(
             *note = format!("{} repaired {} times", repairer.id, repairer.total_fixed);
             
 
-            // updating the other repairers 
-            let tmp_tf = repairer.total_fixed;
-            let tmp_id = repairer.id;
 
-            repairer.other_repairers_repairs.insert(tmp_id, tmp_tf).unwrap();
 
             // updating the move turn
             repairer.move_turn = !repairer.move_turn;
@@ -240,14 +252,14 @@ pub fn execute(
                 .apply_on_index(repairer.current_location);
 
             // updating the decision
-            repairer.decision = Move::Empty;
+            repairer.decision = Move::Empty.clone();
 
 
             //updating the move turn
             repairer.move_turn = !repairer.move_turn;
 
             // adding the total moves
-            repairer.total_moves += 1;
+            repairer.total_moves = repairer.total_moves.add(1);
 
 
             let mut note = matrix[repairer.current_location.0 as usize]
